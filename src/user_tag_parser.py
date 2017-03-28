@@ -1,5 +1,6 @@
 from pyspark import SparkConf, SparkContext
 from pyspark.sql import SparkSession
+from pyspark.sql.functions import countDistinct, count
 from pyspark.mllib.recommendation import ALS
 from pyspark.ml.feature import StringIndexer
 from pyspark.mllib.evaluation import RegressionMetrics
@@ -23,30 +24,52 @@ header2 = rdd2.first()
 rdd2 = rdd2.filter(lambda row: row != header2).toDF(header2)
 
 # Join the two CSVs
-keep1 = [rdd1.OwnerUserId, rdd2.Tag]
-cond = [rdd1.Id == rdd2.Id, rdd1.OwnerUserId != 'NA']
-join_result = rdd1.join(rdd2, cond).select(*keep1)
+keep1 = [rdd1.OwnerUserId, rdd2.Tag, rdd1.Id]
+cond1 = [rdd1.Id == rdd2.Id, rdd1.OwnerUserId != 'NA']
+join_result = rdd1.join(rdd2, cond1).select(*keep1)
 
 # Order by user ID
-id_tag_table = join_result.orderBy(rdd1.OwnerUserId)
-id_tag_table.show()
+uid_tag_qid_table = join_result.orderBy(rdd1.OwnerUserId)
+uid_tag_qid_table.show()
 
 # Count the number of tags per user
-id_tag_count = id_tag_table.groupBy(rdd1.OwnerUserId, rdd2.Tag).count()
+id_tag_count = uid_tag_qid_table.select(rdd1.OwnerUserId, rdd2.Tag).groupBy(
+    rdd1.OwnerUserId, rdd2.Tag).agg(count('*').alias('TagCount'))
 id_tag_count.show()
 
+# Count the total number of questions per user
+id_question_count = uid_tag_qid_table.select(
+    rdd1.OwnerUserId, rdd1.Id).groupBy(rdd1.OwnerUserId).agg(
+    countDistinct(rdd1.Id).alias('QuestionCount'))
+id_question_count.show()
+
+# Join the 2 counts dataframes
+keep2 = [id_tag_count.OwnerUserId, id_tag_count.Tag, id_tag_count.TagCount,
+         id_question_count.QuestionCount]
+cond2 = [id_tag_count.OwnerUserId == id_question_count.OwnerUserId]
+join_counts = id_tag_count.join(id_question_count, cond2).select(*keep2)
+join_counts_ordered = join_counts.orderBy(rdd1.OwnerUserId)
+join_counts_ordered.show()
+
+# Normalize the TagCount using QuestionCount
+normalized_result = join_counts_ordered.withColumn(
+    'FinalTagCount',
+    join_counts_ordered.TagCount / join_counts_ordered.QuestionCount)
+normalized_result.show()
+
 # Converts OwnerUserId into an int
-id_tag_count = id_tag_count.withColumn("OwnerUserId", id_tag_count[
-    "OwnerUserId"].cast("int").alias("OwnerUserId"))
+normalized_result = normalized_result.withColumn(
+    'OwnerUserId', normalized_result['OwnerUserId'].cast('int').alias('UserId'))
+print normalized_result
 
-# Creates a new column that associates each tag to an index,
-# which becomes the training set
-indexer = StringIndexer(inputCol="Tag", outputCol="TagIndex").fit(id_tag_count)
-df_index = indexer.transform(id_tag_count)
-df_index.show()
+# Creates a new column that associates each tag to an index
+indexer = StringIndexer(
+    inputCol='Tag', outputCol='TagIndex').fit(normalized_result)
+normalized_tag_index = indexer.transform(normalized_result)
+normalized_tag_index.show()
 
-keep2 = ['OwnerUserId', 'TagIndex', 'count']
-final = df_index.select(*keep2)
+keep3 = ['OwnerUserId', 'TagIndex', 'FinalTagCount']
+final = normalized_tag_index.select(*keep3)
 final.show()
 
 # Save data into a single file
@@ -57,14 +80,14 @@ final.show()
 # training, test = final.randomSplit([0.8, 0.2])
 
 # Creates the recommendation model
-model = ALS.train(final, 5)
-testdata = final.rdd.map(lambda p: (p[0], p[1]))
-predictions = model.predictAll(testdata).map(lambda r: ((r[0], r[1]), r[2]))
-print predictions.collect()
-ratesAndPreds = final.rdd.map(lambda r: ((r[0], r[1]), r[2])).join(predictions)
-MSE = ratesAndPreds.map(lambda r: (r[1][0] - r[1][1])**2).mean()
-RMSE = math.sqrt(MSE)
-print RMSE
+# model = ALS.train(final, 5)
+# testdata = final.rdd.map(lambda p: (p[0], p[1]))
+# predictions = model.predictAll(testdata).map(lambda r: ((r[0], r[1]), r[2]))
+# print predictions.collect()
+# ratesAndPreds = final.rdd.map(lambda r: ((r[0], r[1]), r[2])).join(predictions)
+# MSE = ratesAndPreds.map(lambda r: (r[1][0] - r[1][1])**2).mean()
+# RMSE = math.sqrt(MSE)
+# print RMSE
 # metrics = RegressionMetrics(ratesAndPreds)
 # rmse = metrics.rootMeanSquaredError
 # print rmse
