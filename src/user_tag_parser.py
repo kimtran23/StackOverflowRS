@@ -1,9 +1,10 @@
 from pyspark import SparkConf, SparkContext
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import countDistinct, count
-from pyspark.mllib.recommendation import ALS
+from pyspark.sql.window import Window
+from pyspark.sql.functions import countDistinct, count, rank, col
+from pyspark.ml.recommendation import ALS
 from pyspark.ml.feature import StringIndexer
-from pyspark.mllib.evaluation import RegressionMetrics
+from pyspark.ml.evaluation import RegressionEvaluator
 import math
 
 conf = SparkConf().setAppName('tagcount').setMaster('local[*]')
@@ -73,11 +74,59 @@ final = normalized_tag_index.select(*keep3)
 final.show()
 
 # Save data into a single file
-# id_tag_count.coalesce(1).write.format(
+# final.coalesce(1).write.format(
 #     'com.databricks.spark.csv').save('../data/tagcount')
 
 # Create training and testing set
-# training, test = final.randomSplit([0.8, 0.2])
+training, test = final.randomSplit([0.8, 0.2])
+
+# Creates the recommendation model
+als = ALS(userCol='OwnerUserId', itemCol='TagIndex', ratingCol='FinalTagCount')
+model = als.fit(training)
+predictions = model.transform(test)
+# Remove any rows containing null/NaN values
+predictions = predictions.na.drop()
+
+print 'Predictions (' + str(predictions.count()) + '):'
+print predictions.toDF('OwnerUserId', 'TagIndex', 'FinalTagCount', 'prediction').show()
+
+# Evaluate the RMSE
+evaluator = RegressionEvaluator(metricName='rmse', labelCol='FinalTagCount',
+                                predictionCol='prediction')
+rmse = evaluator.evaluate(predictions)
+print 'RMSE: ' + str(rmse)
+
+# Get top 2 predictions
+predictions_df = predictions.toDF('OwnerUserId', 'TagIndex', 'FinalTagCount', 'prediction')
+predictions_df.show()
+window = Window.partitionBy(predictions_df['OwnerUserId']).orderBy(predictions_df['prediction'].desc())
+top_predictions = predictions_df.select('*', rank().over(window).alias('rank')).filter(col('rank') <= 2)
+top_predictions.show()
+
+# Test if top predictions work
+new_user = [
+    [100, 29.0, 1.0],
+    [100, 3.0, 0.5],
+    [100, 58.0, 0.5],
+    [100, 30.0, 0.5]
+]
+new_user_rdd = sc.parallelize(new_user)
+final_with_new = final.rdd.union(new_user_rdd)
+new_model = als.fit(final_with_new)
+new_user_df = new_user_rdd.toDF(['OwnerUserId', 'TagIndex','FinalTagCount'])
+new_predictions = new_model.transform(new_user_df)
+new_predictions_df = new_predictions.toDF('OwnerUserId', 'TagIndex', 'FinalTagCount', 'prediction')
+
+new_window = Window.partitionBy(new_predictions_df['OwnerUserId']).orderBy(new_predictions_df['prediction'].desc())
+new_user_rec = new_user_df.select('*', rank().over(new_window).alias('rank')).filter(col('rank') <= 2)
+new_user_rec.show()
+
+# Get the tag names to put into the predictions
+normalized_tag_index.show()
+top_predictions = predictions_df.select('*', rank().over(window).alias('rank')).filter(col('rank') <= 2)
+tag_name_index = normalized_tag_index.select(*['TagIndex', 'Tag'])
+rec_tags = top_predictions.join(tag_name_index, top_predictions.TagIndex == tag_name_index.TagIndex)
+rec_tags.show()
 
 # Creates the recommendation model
 # model = ALS.train(final, 5)
