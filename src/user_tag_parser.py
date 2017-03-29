@@ -1,7 +1,7 @@
 from pyspark import SparkConf, SparkContext
 from pyspark.sql import SparkSession
 from pyspark.sql.window import Window
-from pyspark.sql.functions import countDistinct, count, rank, col
+from pyspark.sql.functions import countDistinct, count, rank, col, avg
 from pyspark.ml.recommendation import ALS
 from pyspark.ml.feature import StringIndexer
 from pyspark.ml.evaluation import RegressionEvaluator
@@ -11,8 +11,8 @@ conf = SparkConf().setAppName('tagcount').setMaster('local[*]')
 sc = SparkContext(conf=conf)
 spark = SparkSession(sc)
 
-q_filename = '../data/questions_test.csv'
-qt_filename = '../data/question_tags_test.csv'
+q_filename = '../data/questions_5000_test.csv'
+qt_filename = '../data/question_tags_5000_test.csv'
 
 # Retrieve questions data
 rdd1 = sc.textFile(q_filename).map(lambda line: line.split(','))
@@ -37,23 +37,21 @@ uid_tag_qid_table.show()
 id_tag_count = uid_tag_qid_table.select(rdd1.OwnerUserId, rdd2.Tag).groupBy(
     rdd1.OwnerUserId, rdd2.Tag).agg(count('*').alias('TagCount'))
 
-# Count the total number of questions per user
-id_question_count = uid_tag_qid_table.select(
-    rdd1.OwnerUserId, rdd1.Id).groupBy(rdd1.OwnerUserId).agg(
-    countDistinct(rdd1.Id).alias('QuestionCount'))
+# Calculate the average of each UserId
+tag_avg = id_tag_count.select(rdd1.OwnerUserId, id_tag_count.TagCount).groupBy(
+    rdd1.OwnerUserId).agg(avg(id_tag_count.TagCount).alias('TagAvg'))
 
-# Join the 2 counts dataframes
+# Join the tag count dataframe with the average
 keep2 = [id_tag_count.OwnerUserId, id_tag_count.Tag, id_tag_count.TagCount,
-         id_question_count.QuestionCount]
-cond2 = [id_tag_count.OwnerUserId == id_question_count.OwnerUserId]
-join_counts = id_tag_count.join(id_question_count, cond2).select(*keep2)
+         tag_avg.TagAvg]
+cond2 = [id_tag_count.OwnerUserId == tag_avg.OwnerUserId]
+join_counts = id_tag_count.join(tag_avg, cond2).select(*keep2)
 join_counts_ordered = join_counts.orderBy(rdd1.OwnerUserId)
 join_counts_ordered.show()
 
-# Normalize the TagCount using QuestionCount
+# Normalize the TagCount using TagAvg
 normalized_result = join_counts_ordered.withColumn(
-    'FinalTagCount',
-    join_counts_ordered.TagCount / join_counts_ordered.QuestionCount)
+    'FinalTagCount', join_counts_ordered.TagCount - join_counts_ordered.TagAvg)
 normalized_result.show()
 
 # Converts OwnerUserId into an int
@@ -73,10 +71,14 @@ final = normalized_tag_index.select(*keep3)
 final.show()
 
 # Create training and testing set
-training, test = final.randomSplit([0.8, 0.2])
+training, test = final.randomSplit([0.6, 0.4])
+
+print 'Training size: ' + str(training.count())
+print 'Test size: ' + str(test.count())
+print 'Total size: ' + str(final.count())
 
 # Creates the recommendation model
-als = ALS(implicitPrefs=True, userCol='OwnerUserId',
+als = ALS(userCol='OwnerUserId',
           itemCol='TagIndex', ratingCol='FinalTagCount')
 model = als.fit(training)
 predictions = model.transform(test)
