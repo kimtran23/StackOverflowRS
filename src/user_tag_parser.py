@@ -36,13 +36,11 @@ uid_tag_qid_table.show()
 # Count the number of tags per user
 id_tag_count = uid_tag_qid_table.select(rdd1.OwnerUserId, rdd2.Tag).groupBy(
     rdd1.OwnerUserId, rdd2.Tag).agg(count('*').alias('TagCount'))
-id_tag_count.show()
 
 # Count the total number of questions per user
 id_question_count = uid_tag_qid_table.select(
     rdd1.OwnerUserId, rdd1.Id).groupBy(rdd1.OwnerUserId).agg(
     countDistinct(rdd1.Id).alias('QuestionCount'))
-id_question_count.show()
 
 # Join the 2 counts dataframes
 keep2 = [id_tag_count.OwnerUserId, id_tag_count.Tag, id_tag_count.TagCount,
@@ -60,8 +58,8 @@ normalized_result.show()
 
 # Converts OwnerUserId into an int
 normalized_result = normalized_result.withColumn(
-    'OwnerUserId', normalized_result['OwnerUserId'].cast('int').alias('UserId'))
-print normalized_result
+    'OwnerUserId',
+    normalized_result['OwnerUserId'].cast('int').alias('UserId'))
 
 # Creates a new column that associates each tag to an index
 indexer = StringIndexer(
@@ -69,55 +67,60 @@ indexer = StringIndexer(
 normalized_tag_index = indexer.transform(normalized_result)
 normalized_tag_index.show()
 
+# Only keep values we need for the recommendation model
 keep3 = ['OwnerUserId', 'TagIndex', 'FinalTagCount']
 final = normalized_tag_index.select(*keep3)
 final.show()
-
-# Save data into a single file
-# final.coalesce(1).write.format(
-#     'com.databricks.spark.csv').save('../data/tagcount')
 
 # Create training and testing set
 training, test = final.randomSplit([0.8, 0.2])
 
 # Creates the recommendation model
-als = ALS(userCol='OwnerUserId', itemCol='TagIndex', ratingCol='FinalTagCount')
+als = ALS(implicitPrefs=True, userCol='OwnerUserId',
+          itemCol='TagIndex', ratingCol='FinalTagCount')
 model = als.fit(training)
 predictions = model.transform(test)
-# Remove any rows containing null/NaN values
+
+# Remove any rows containing null/NaN values, caused by the test set
+# having tags that were not in the training set
 predictions = predictions.na.drop()
 
 print 'Predictions (' + str(predictions.count()) + '):'
-print predictions.toDF('OwnerUserId', 'TagIndex', 'FinalTagCount', 'Prediction').show()
+predictions_df = predictions.toDF(
+    'OwnerUserId', 'TagIndex', 'FinalTagCount', 'Prediction')
+predictions_df.show()
 
-# Evaluate the RMSE
+# Evaluate the recommendation model using RMSE
 evaluator = RegressionEvaluator(metricName='rmse', labelCol='FinalTagCount',
-                                predictionCol='Prediction')
+                                predictionCol='prediction')
 rmse = evaluator.evaluate(predictions)
 print 'RMSE: ' + str(rmse)
 
-# Get top 2 predictions
-predictions_df = predictions.toDF('OwnerUserId', 'TagIndex', 'FinalTagCount', 'Prediction')
-predictions_df.show()
-window = Window.partitionBy(predictions_df['OwnerUserId']).orderBy(predictions_df['Prediction'].desc())
-top_predictions = predictions_df.select('*', rank().over(window).alias('rank')).filter(col('rank') <= 2).drop('rank')
-top_predictions.show()
-
-# Get the tags' name and ID
+# Get the tags' name and index number
 tag_name_index = normalized_tag_index.select(*['TagIndex', 'Tag']).distinct()
-# Get the corresponding tags for each prediction
-rec_tags = predictions_df.join(tag_name_index, predictions_df.TagIndex == tag_name_index.TagIndex, 'leftouter').drop('TagIndex')
+
+# Get the corresponding recommended tags for each prediction
+rec_tags = predictions_df.join(
+    tag_name_index, predictions_df.TagIndex == tag_name_index.TagIndex,
+    'leftouter').drop('TagIndex')
 rec_tags.show()
 
-# Get the questions that have the tags and count the number of tags each question has
+# Get the questions that have the recommended tags
+# and count the number of recommended tags each question is associated to
 rec_tags_id = rec_tags.join(rdd2, rec_tags.Tag == rdd2.Tag, 'left')
-rec_tags_id = rec_tags_id.groupBy('OwnerUserId', 'Id').agg(count('Id').alias('QCount'))
+rec_tags_id = rec_tags_id.groupBy(
+    'OwnerUserId', 'Id').agg(count('Id').alias('RecTagCount'))
 rec_tags_id.show()
 
-# Get the top questions (has the most tags recommended)
-window = Window.partitionBy(rec_tags_id['OwnerUserId']).orderBy(rec_tags_id['QCount'].desc())
-recommendations = rec_tags_id.select('*', rank().over(window).alias('Rank')).filter(col('Rank') <= 2).drop('Rank')
+# Get the top questions that have the most tags recommended
+window = Window.partitionBy(rec_tags_id['OwnerUserId']).orderBy(
+    rec_tags_id['RecTagCount'].desc())
+recommendations = rec_tags_id.select(
+    '*', rank().over(window).alias('Rank')).filter(
+    col('Rank') <= 2).drop('Rank')
+print 'Recommended question IDs: :'
 recommendations.show()
+
 
 # Creating test user to see how the above code works on predictable data
 # Create test user that has similar tags as user 1
@@ -129,19 +132,26 @@ new_user = [
 ]
 new_user_rdd = sc.parallelize(new_user)
 new_model = als.fit(final)
-new_user_df = new_user_rdd.toDF(['OwnerUserId', 'TagIndex','FinalTagCount', 'Prediction'])
+new_user_df = new_user_rdd.toDF(
+    ['OwnerUserId', 'TagIndex', 'FinalTagCount', 'Prediction'])
 new_user_df.show()
 
-# Get the tags' name and ID
-tag_name_index = normalized_tag_index.select(*['TagIndex', 'Tag']).distinct()
 # Get the corresponding tags for each prediction
-rec_tags = new_user_df.join(tag_name_index, new_user_df.TagIndex == tag_name_index.TagIndex, 'leftouter').drop('TagIndex')
+rec_tags = new_user_df.join(
+    tag_name_index, new_user_df.TagIndex == tag_name_index.TagIndex,
+    'leftouter').drop('TagIndex')
 rec_tags.show()
 
-# Get the questions that have the tags and count the number of tags each question has
+# Get the questions that have the recommended tags
+# and count the number of recommended tags each question is associated to
 rec_tags_id = rec_tags.join(rdd2, rec_tags.Tag == rdd2.Tag, 'left')
-rec_tags_id = rec_tags_id.groupBy('OwnerUserId', 'Id').agg(count('Id').alias('QCount'))
+rec_tags_id = rec_tags_id.groupBy(
+    'OwnerUserId', 'Id').agg(count('Id').alias('RecTagCount'))
 rec_tags_id.show()
+
 # Get the top questions (has the most tags recommended)
-window = Window.partitionBy(rec_tags_id['OwnerUserId']).orderBy(rec_tags_id['QCount'].desc())
-rec_tags_id.select('*', rank().over(window).alias('Rank')).filter(col('Rank') <= 2).drop('Rank').show()
+window = Window.partitionBy(rec_tags_id['OwnerUserId']).orderBy(
+    rec_tags_id['RecTagCount'].desc())
+print 'Recommended question IDs: '
+rec_tags_id.select('*', rank().over(window).alias('Rank')
+                   ).filter(col('Rank') <= 2).drop('Rank').show()

@@ -1,7 +1,8 @@
 import csv
 
+size = 500000
 csv_filename = '../data/question_tags.csv'
-test_filename = '../data/question_tags_test.csv'
+test_filename = '../data/question_tags_' + str(size) + '_test.csv'
 
 with open(csv_filename, 'rb') as csvFile, open(test_filename, 'wb') as testFile:
     datareader = csv.reader(csvFile)
@@ -9,7 +10,7 @@ with open(csv_filename, 'rb') as csvFile, open(test_filename, 'wb') as testFile:
     count = 0
 
     for row in datareader:
-        if count < 101:
+        if count <= size:
             count += 1
             question_id = row[0]
             tag = row[1]
