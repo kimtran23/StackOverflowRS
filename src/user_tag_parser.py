@@ -88,80 +88,60 @@ predictions = model.transform(test)
 predictions = predictions.na.drop()
 
 print 'Predictions (' + str(predictions.count()) + '):'
-print predictions.toDF('OwnerUserId', 'TagIndex', 'FinalTagCount', 'prediction').show()
+print predictions.toDF('OwnerUserId', 'TagIndex', 'FinalTagCount', 'Prediction').show()
 
 # Evaluate the RMSE
 evaluator = RegressionEvaluator(metricName='rmse', labelCol='FinalTagCount',
-                                predictionCol='prediction')
+                                predictionCol='Prediction')
 rmse = evaluator.evaluate(predictions)
 print 'RMSE: ' + str(rmse)
 
 # Get top 2 predictions
-predictions_df = predictions.toDF('OwnerUserId', 'TagIndex', 'FinalTagCount', 'prediction')
+predictions_df = predictions.toDF('OwnerUserId', 'TagIndex', 'FinalTagCount', 'Prediction')
 predictions_df.show()
-window = Window.partitionBy(predictions_df['OwnerUserId']).orderBy(predictions_df['prediction'].desc())
-top_predictions = predictions_df.select('*', rank().over(window).alias('rank')).filter(col('rank') <= 2)
+window = Window.partitionBy(predictions_df['OwnerUserId']).orderBy(predictions_df['Prediction'].desc())
+top_predictions = predictions_df.select('*', rank().over(window).alias('rank')).filter(col('rank') <= 2).drop('rank')
 top_predictions.show()
 
-# Test if top predictions work
-new_user = [
-    [100, 29.0, 1.0],
-    [100, 3.0, 0.5],
-    [100, 58.0, 0.5],
-    [100, 30.0, 0.5]
-]
-new_user_rdd = sc.parallelize(new_user)
-final_with_new = final.rdd.union(new_user_rdd)
-new_model = als.fit(final_with_new)
-new_user_df = new_user_rdd.toDF(['OwnerUserId', 'TagIndex','FinalTagCount'])
-new_predictions = new_model.transform(new_user_df)
-new_predictions_df = new_predictions.toDF('OwnerUserId', 'TagIndex', 'FinalTagCount', 'prediction')
-
-new_window = Window.partitionBy(new_predictions_df['OwnerUserId']).orderBy(new_predictions_df['prediction'].desc())
-new_user_rec = new_user_df.select('*', rank().over(new_window).alias('rank')).filter(col('rank') <= 2)
-new_user_rec.show()
-
-# Get the tag names to put into the predictions
-normalized_tag_index.show()
-top_predictions = predictions_df.select('*', rank().over(window).alias('rank')).filter(col('rank') <= 2)
-tag_name_index = normalized_tag_index.select(*['TagIndex', 'Tag'])
-rec_tags = top_predictions.join(tag_name_index, top_predictions.TagIndex == tag_name_index.TagIndex)
+# Get the tags' name and ID
+tag_name_index = normalized_tag_index.select(*['TagIndex', 'Tag']).distinct()
+# Get the corresponding tags for each prediction
+rec_tags = predictions_df.join(tag_name_index, predictions_df.TagIndex == tag_name_index.TagIndex, 'leftouter').drop('TagIndex')
 rec_tags.show()
 
-# Creates the recommendation model
-# model = ALS.train(final, 5)
-# testdata = final.rdd.map(lambda p: (p[0], p[1]))
-# predictions = model.predictAll(testdata).map(lambda r: ((r[0], r[1]), r[2]))
-# print predictions.collect()
-# ratesAndPreds = final.rdd.map(lambda r: ((r[0], r[1]), r[2])).join(predictions)
-# MSE = ratesAndPreds.map(lambda r: (r[1][0] - r[1][1])**2).mean()
-# RMSE = math.sqrt(MSE)
-# print RMSE
-# metrics = RegressionMetrics(ratesAndPreds)
-# rmse = metrics.rootMeanSquaredError
-# print rmse
-# als = ALS(userCol="OwnerUserId", itemCol="TagIndex", ratingCol="count")
-# model = als.fit(training)
+# Get the questions that have the tags and count the number of tags each question has
+rec_tags_id = rec_tags.join(rdd2, rec_tags.Tag == rdd2.Tag, 'left')
+rec_tags_id = rec_tags_id.groupBy('OwnerUserId', 'Id').agg(count('Id').alias('QCount'))
+rec_tags_id.show()
 
-# Create our own testing set
-# test1 = [1, 'c#', 2, 29.0]
-# test2 = [1, 'datetime', 2, 29.0]
-# test3 = [1, 'datediff', 1, 58.0]
-# test4 = [1, 'relative-time-span', 1, 30.0]
-# test_set = [test1, test2, test3, test4]
-# test = sc.parallelize(test_set).toDF(
-#     ['OwnerUserId', 'Tag', 'count', 'TagIndex'])
+# Get the top questions (has the most tags recommended)
+window = Window.partitionBy(rec_tags_id['OwnerUserId']).orderBy(rec_tags_id['QCount'].desc())
+recommendations = rec_tags_id.select('*', rank().over(window).alias('Rank')).filter(col('Rank') <= 2).drop('Rank')
+recommendations.show()
 
-# Evaluate RMSE on the test data
-# keep3 = ['OwnerUserId', 'TagIndex']
-# test = final.select(*keep3)
-# test.show()
-# predictions = model.predictAll(test.rdd)
-# print predictions.collect()
-# predictions = model.transform(test)
+# Creating test user to see how the above code works on predictable data
+# Create test user that has similar tags as user 1
+new_user = [
+    [100, 29.0, 1.0, 0.9],
+    [100, 3.0, 0.5, 0.4],
+    [100, 58.0, 0.5, 0.6],
+    [100, 30.0, 0.5, 0.3]
+]
+new_user_rdd = sc.parallelize(new_user)
+new_model = als.fit(final)
+new_user_df = new_user_rdd.toDF(['OwnerUserId', 'TagIndex','FinalTagCount', 'Prediction'])
+new_user_df.show()
 
+# Get the tags' name and ID
+tag_name_index = normalized_tag_index.select(*['TagIndex', 'Tag']).distinct()
+# Get the corresponding tags for each prediction
+rec_tags = new_user_df.join(tag_name_index, new_user_df.TagIndex == tag_name_index.TagIndex, 'leftouter').drop('TagIndex')
+rec_tags.show()
 
-# evaluator = RegressionEvaluator(
-#     metricName="rmse", labelCol="count", predictionCol="prediction")
-# rmse = evaluator.evaluate(predictions.toDF())
-# print rmse
+# Get the questions that have the tags and count the number of tags each question has
+rec_tags_id = rec_tags.join(rdd2, rec_tags.Tag == rdd2.Tag, 'left')
+rec_tags_id = rec_tags_id.groupBy('OwnerUserId', 'Id').agg(count('Id').alias('QCount'))
+rec_tags_id.show()
+# Get the top questions (has the most tags recommended)
+window = Window.partitionBy(rec_tags_id['OwnerUserId']).orderBy(rec_tags_id['QCount'].desc())
+rec_tags_id.select('*', rank().over(window).alias('Rank')).filter(col('Rank') <= 2).drop('Rank').show()
