@@ -7,6 +7,54 @@ from pyspark.ml.feature import StringIndexer
 from pyspark.ml.evaluation import RegressionEvaluator
 import math
 
+
+def recommend_questions(final, tag_name_index, rdd1, rdd2):
+    # Getting the tags for every user
+    users_tags = final.join(
+        tag_name_index, final.TagIndex == tag_name_index.TagIndex,
+        'leftouter').drop('TagIndex').orderBy(
+        final.OwnerUserId).withColumnRenamed('OwnerUserId', 'User')
+    users_tags.show()
+
+    # Get the question IDs for all the users
+    qid_users_tags = rdd2.join(
+        users_tags, users_tags.Tag == rdd2.Tag,
+        'left').drop(rdd2.Tag).dropna()
+    qid_users_tags.show()
+
+    # Count the number of tags each question is associated to
+    qid_users_tags = qid_users_tags.groupBy(
+        'User', 'Id').agg(count('Id').alias('RecTagCount'))
+    qid_users_tags.show()
+
+    # Get the creator for each question
+    questions_owner = rdd1.select(*[rdd1.Id, rdd1.OwnerUserId])
+    questions_owner = questions_owner.withColumn(
+        'OwnerUserId', questions_owner['OwnerUserId'].cast('int'))
+    questions_owner.show()
+    qid_users_tags_owner = qid_users_tags.join(
+        questions_owner, questions_owner.Id == qid_users_tags.Id,
+        'left').drop(questions_owner.Id)
+    qid_users_tags_owner.show()
+
+    # The question is not recommended if it is created by the user
+    qid_users_tags_owner = qid_users_tags_owner.rdd.filter(
+        lambda x: x.User != x.OwnerUserId).toDF()
+    qid_users_tags_owner.show()
+
+    # Get the top questions that have the most tags recommended
+    window = Window.partitionBy(qid_users_tags_owner['User']).orderBy(
+        qid_users_tags_owner['RecTagCount'].desc())
+    recommendations = qid_users_tags_owner.select(
+        '*', rank().over(window).alias('Rank')).filter(
+        col('Rank') <= 2).drop('Rank')
+
+    print 'Recommended question IDs:'
+    recommendations.show()
+
+    return recommendations
+
+
 conf = SparkConf().setAppName('tagcount').setMaster('local[*]')
 sc = SparkContext(conf=conf)
 spark = SparkSession(sc)
@@ -101,59 +149,28 @@ print 'RMSE: ' + str(rmse)
 # Get the tags' name and index number
 tag_name_index = normalized_tag_index.select(*['TagIndex', 'Tag']).distinct()
 
-# Get the corresponding recommended tags for each prediction
-rec_tags = predictions_df.join(
-    tag_name_index, predictions_df.TagIndex == tag_name_index.TagIndex,
-    'leftouter').drop('TagIndex')
-rec_tags.show()
+# Finding expected questions to recommend for all users
+expected_recommendations = recommend_questions(
+    final, tag_name_index, rdd1, rdd2)
 
-# Get the questions that have the recommended tags
-# and count the number of recommended tags each question is associated to
-rec_tags_id = rec_tags.join(rdd2, rec_tags.Tag == rdd2.Tag, 'left')
-rec_tags_id = rec_tags_id.groupBy(
-    'OwnerUserId', 'Id').agg(count('Id').alias('RecTagCount'))
-rec_tags_id.show()
+# Finding questions to recommend based on predictions for all users
+formatted_predictions = predictions.drop('FinalTagCount').withColumnRenamed(
+    'prediction', 'FinalTagCount')
+final_with_predictions = training.union(formatted_predictions)
+recommendations = recommend_questions(
+    final_with_predictions, tag_name_index, rdd1, rdd2)
 
-# Get the top questions that have the most tags recommended
-window = Window.partitionBy(rec_tags_id['OwnerUserId']).orderBy(
-    rec_tags_id['RecTagCount'].desc())
-recommendations = rec_tags_id.select(
-    '*', rank().over(window).alias('Rank')).filter(
-    col('Rank') <= 2).drop('Rank')
-print 'Recommended question IDs: :'
-recommendations.show()
+# Finding questions to recommend for specific user
+user_id = str(predictions.select('OwnerUserId').first()[0])
+print 'Predicting for user ' + user_id
+# Expected recommendations for the specified user
+expected_user_recommandations = expected_recommendations.filter(
+    expected_recommendations.User == user_id)
+print 'Expected recommendations for user ' + user_id + ':'
+expected_user_recommandations.show()
 
-
-# Creating test user to see how the above code works on predictable data
-# Create test user that has similar tags as user 1
-new_user = [
-    [100, 29.0, 1.0, 0.9],
-    [100, 3.0, 0.5, 0.4],
-    [100, 58.0, 0.5, 0.6],
-    [100, 30.0, 0.5, 0.3]
-]
-new_user_rdd = sc.parallelize(new_user)
-new_model = als.fit(final)
-new_user_df = new_user_rdd.toDF(
-    ['OwnerUserId', 'TagIndex', 'FinalTagCount', 'Prediction'])
-new_user_df.show()
-
-# Get the corresponding tags for each prediction
-rec_tags = new_user_df.join(
-    tag_name_index, new_user_df.TagIndex == tag_name_index.TagIndex,
-    'leftouter').drop('TagIndex')
-rec_tags.show()
-
-# Get the questions that have the recommended tags
-# and count the number of recommended tags each question is associated to
-rec_tags_id = rec_tags.join(rdd2, rec_tags.Tag == rdd2.Tag, 'left')
-rec_tags_id = rec_tags_id.groupBy(
-    'OwnerUserId', 'Id').agg(count('Id').alias('RecTagCount'))
-rec_tags_id.show()
-
-# Get the top questions (has the most tags recommended)
-window = Window.partitionBy(rec_tags_id['OwnerUserId']).orderBy(
-    rec_tags_id['RecTagCount'].desc())
-print 'Recommended question IDs: '
-rec_tags_id.select('*', rank().over(window).alias('Rank')
-                   ).filter(col('Rank') <= 2).drop('Rank').show()
+# Recommendations for specified user From predictions
+user_recommandations = recommendations.filter(
+    recommendations.User == user_id)
+print 'Recommendations for user ' + user_id + ' from predictions:'
+user_recommandations.show()
