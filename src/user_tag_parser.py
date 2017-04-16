@@ -47,7 +47,7 @@ def recommend_questions(final, tag_name_index, rdd1, rdd2):
         qid_users_tags_owner['RecTagCount'].desc())
     recommendations = qid_users_tags_owner.select(
         '*', rank().over(window).alias('Rank')).filter(
-        col('Rank') <= 2).drop('Rank')
+        col('Rank') <= 10).drop('Rank')
 
     print 'Recommended question IDs:'
     recommendations.show()
@@ -164,13 +164,13 @@ recommendations = recommend_questions(
 user_id = str(predictions.select('OwnerUserId').first()[0])
 print 'Predicting for user ' + user_id
 # Expected recommendations for the specified user
-expected_user_recommandations = expected_recommendations.filter(
+expected_user_recommendations = expected_recommendations.filter(
     expected_recommendations.User == user_id)
 print 'Expected recommendations for user ' + user_id + ':'
-expected_user_recommandations.show()
+expected_user_recommendations.limit(10).show()
 
 # Recommendations for specified user From predictions
-user_recommandations = recommendations.filter(
+user_recommendations = recommendations.filter(
     recommendations.User == user_id)
 print 'Recommendations for user ' + user_id + ' from predictions:'
-user_recommandations.show()
+user_recommendations.limit(10).show()
